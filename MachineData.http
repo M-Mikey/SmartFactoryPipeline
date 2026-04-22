@@ -1,0 +1,6 @@
+@MachineData_HostAddress = http://localhost:5004
+
+GET {{MachineData_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
