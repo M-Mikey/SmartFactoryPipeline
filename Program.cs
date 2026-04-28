@@ -16,6 +16,7 @@ var processor = serviceBusClient.CreateProcessor(queueName);
 
 builder.Services.AddSingleton(serviceBusClient);
 builder.Services.AddSingleton(processor);
+builder.Services.AddSingleton(new CircuitBreaker(3, TimeSpan.FromMinutes(30)));
 builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();

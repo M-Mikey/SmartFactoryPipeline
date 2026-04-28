@@ -10,26 +10,29 @@ public class Worker : BackgroundService
     private readonly ILogger<Worker> _logger;
     private readonly ServiceBusProcessor _busProcessor;
     private readonly IServiceScopeFactory _serviceScopeFactory;
+    private readonly CircuitBreaker _circuitBreaker;
 
-    public Worker(ILogger<Worker> logger, ServiceBusProcessor busProcessor, IServiceScopeFactory serviceScopeFactory)
+    public Worker(ILogger<Worker> logger, ServiceBusProcessor busProcessor, IServiceScopeFactory serviceScopeFactory, CircuitBreaker circuitBreaker)
     {
         _logger = logger;
         _serviceScopeFactory = serviceScopeFactory;
+        _circuitBreaker = circuitBreaker;
         _busProcessor = busProcessor;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // ✅ Error handler FIRST — outside everything
+     
         _busProcessor.ProcessErrorAsync += args =>
         {
             _logger.LogError(args.Exception, "Service Bus error: {ErrorMessage}", args.Exception.Message);
             return Task.CompletedTask;
         };
 
-        // ✅ Message handler SECOND
+        
         _busProcessor.ProcessMessageAsync += async args =>
         {
+            
             string body = args.Message.Body.ToString();
             _logger.LogInformation("Received message: {MessageBody}", body);
 
@@ -37,14 +40,32 @@ public class Worker : BackgroundService
 
             using var scope = _serviceScopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            db.MachineInputs.Add(input);
-            await db.SaveChangesAsync();
 
-            await args.CompleteMessageAsync(args.Message);
-            _logger.LogInformation("Saved to Oracle: {MessageBody}", body);
+            if (_circuitBreaker.IsOpen())
+            {
+                _logger.LogWarning("Circuit is OPEN. Skipping DB save.");
+                return; 
+            }
+            try
+            {
+                db.MachineInputs.Add(input);
+               
+                await db.SaveChangesAsync();
+
+                await args.CompleteMessageAsync(args.Message);
+                _circuitBreaker.RecordSuccess();
+                _logger.LogInformation("Saved to Oracle: {MessageBody}", body);
+            }
+            catch (Exception ex)
+            {
+                _circuitBreaker.RecordFailure();
+                _logger.LogError(ex, "Error saving to Oracle (DeliveryCount={DeliveryCount}): {MessageBody}", args.Message.DeliveryCount, body);
+                throw;
+            }
+
         };
 
-        // ✅ Start processing LAST
+       
         await _busProcessor.StartProcessingAsync(stoppingToken);
         await Task.Delay(Timeout.Infinite, stoppingToken);
     }
